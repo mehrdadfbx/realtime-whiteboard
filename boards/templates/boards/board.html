@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>وایت‌برد اشتراکی</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; font-family: Tahoma, system-ui, sans-serif; }
+  #toolbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 14px; background: #1f2937; color: #e5e7eb;
+    height: 52px; user-select: none;
+  }
+  #toolbar input[type="color"] { width: 36px; height: 28px; border: none; cursor: pointer; background: none; }
+  #toolbar input[type="range"] { width: 110px; }
+  #toolbar button {
+    background: #374151; color: #fff; border: none; border-radius: 8px;
+    padding: 6px 12px; cursor: pointer; font-family: inherit;
+  }
+  #toolbar button:hover { background: #4b5563; }
+  #status { margin-inline-start: auto; font-size: 12px; opacity: 0.8; }
+  #status.online { color: #4ade80; }
+  #board {
+    display: block; width: 100%; height: calc(100% - 52px);
+    background: #ffffff; cursor: crosshair; touch-action: none; /* pointer events handle touch */
+  }
+</style>
+</head>
+<body>
+  <div id="toolbar">
+    <input type="color" id="colorPicker" value="#111111" title="رنگ">
+    <input type="range" id="widthSlider" min="1" max="20" value="3" title="ضخامت">
+    <button id="clearBtn">🧹 پاک کردن</button>
+    <button id="copyBtn">🔗 کپی لینک اتاق</button>
+    <span id="status">در حال اتصال…</span>
+  </div>
+  <canvas id="board"></canvas>
+
+<script>
+(function () {
+  "use strict";
+
+  var ROOM_SLUG = "{{ room.slug }}";
+  var canvas = document.getElementById("board");
+  var ctx = canvas.getContext("2d");
+  var colorPicker = document.getElementById("colorPicker");
+  var widthSlider = document.getElementById("widthSlider");
+  var statusEl = document.getElementById("status");
+
+  // All strokes ever drawn (local + remote). Kept so we can repaint
+  // the canvas from scratch on resize without asking the server again.
+  var strokes = [];
+
+  /* ---------- Canvas sizing (crisp on HiDPI screens) ---------- */
+  function resizeCanvas() {
+    var dpr = window.devicePixelRatio || 1;
+    var w = canvas.clientWidth, h = canvas.clientHeight;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixels
+    repaint();
+  }
+  window.addEventListener("resize", resizeCanvas);
+
+  /* ---------- Drawing ---------- */
+  // Points are normalized (0..1) so a stroke drawn on a phone renders
+  // correctly on a desktop, matching the backend's storage format.
+  function toNormalized(e) {
+    var r = canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - r.left) / r.width,
+      y: (e.clientY - r.top) / r.height
+    };
+  }
+
+  function drawStroke(stroke) {
+    if (!stroke.points || stroke.points.length === 0) return;
+    var w = canvas.clientWidth, h = canvas.clientHeight;
+    ctx.strokeStyle = stroke.color;
+    ctx.lineWidth = stroke.width;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(stroke.points[0].x * w, stroke.points[0].y * h);
+    for (var i = 1; i < stroke.points.length; i++) {
+      ctx.lineTo(stroke.points[i].x * w, stroke.points[i].y * h);
+    }
+    ctx.stroke();
+  }
+
+  function repaint() {
+    ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+    for (var i = 0; i < strokes.length; i++) drawStroke(strokes[i]);
+  }
+
+  function clearBoard() {
+    strokes = [];
+    ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+  }
+
+  /* ---------- WebSocket ---------- */
+  var scheme = window.location.protocol === "https:" ? "wss" : "ws";
+  var socket = new WebSocket(
+    scheme + "://" + window.location.host + "/ws/boards/" + ROOM_SLUG + "/"
+  );
+
+  socket.onopen = function () {
+    statusEl.textContent = "● متصل";
+    statusEl.classList.add("online");
+  };
+  socket.onclose = function () {
+    statusEl.textContent = "○ قطع شد — صفحه را رفرش کنید";
+    statusEl.classList.remove("online");
+  };
+  socket.onmessage = function (event) {
+    var msg = JSON.parse(event.data);
+    if (msg.type === "history") {
+      // Full board state for newcomers (sent once on connect).
+      strokes = msg.strokes || [];
+      repaint();
+    } else if (msg.type === "stroke") {
+      strokes.push(msg.stroke);
+      drawStroke(msg.stroke);
+    } else if (msg.type === "clear") {
+      clearBoard();
+    }
+  };
+
+  /* ---------- Local drawing (Pointer Events cover mouse + touch) ---------- */
+  var drawing = false;
+  var currentStroke = null;
+
+  canvas.addEventListener("pointerdown", function (e) {
+    e.preventDefault();
+    canvas.setPointerCapture(e.pointerId);
+    drawing = true;
+    currentStroke = {
+      color: colorPicker.value,
+      width: parseInt(widthSlider.value, 10),
+      points: [toNormalized(e)]
+    };
+  });
+
+  canvas.addEventListener("pointermove", function (e) {
+    if (!drawing) return;
+    e.preventDefault();
+    currentStroke.points.push(toNormalized(e));
+    // Incremental paint: only the newest segment, for zero lag.
+    var pts = currentStroke.points, n = pts.length;
+    var w = canvas.clientWidth, h = canvas.clientHeight;
+    ctx.strokeStyle = currentStroke.color;
+    ctx.lineWidth = currentStroke.width;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(pts[n - 2].x * w, pts[n - 2].y * h);
+    ctx.lineTo(pts[n - 1].x * w, pts[n - 1].y * h);
+    ctx.stroke();
+  });
+
+  function finishStroke() {
+    if (!drawing) return;
+    drawing = false;
+    strokes.push(currentStroke);
+    // One message per finished stroke (not per mousemove) keeps
+    // traffic tiny; the server broadcasts it to the room.
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "stroke", stroke: currentStroke }));
+    }
+    currentStroke = null;
+  }
+  canvas.addEventListener("pointerup", finishStroke);
+  canvas.addEventListener("pointercancel", finishStroke);
+
+  /* ---------- Toolbar ---------- */
+  document.getElementById("clearBtn").addEventListener("click", function () {
+    clearBoard();
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "clear" }));
+    }
+  });
+
+  document.getElementById("copyBtn").addEventListener("click", function () {
+    var btn = this;
+    navigator.clipboard.writeText(window.location.href).then(function () {
+      btn.textContent = "✓ کپی شد";
+      setTimeout(function () { btn.textContent = "🔗 کپی لینک اتاق"; }, 1500);
+    });
+  });
+
+  resizeCanvas();
+})();
+</script>
+</body>
+</html>

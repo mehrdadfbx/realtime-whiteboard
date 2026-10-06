@@ -1,0 +1,26 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # channels-redis uses this as the pub/sub "channel layer":
+    # every Daphne worker publishes/subscribes here so strokes
+    # reach all connected browsers, even across processes.
+
+  web:
+    build: .
+    # Apply migrations on every start so a fresh clone just works.
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             daphne -b 0.0.0.0 -p 8000 whiteboard_project.asgi:application"
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DJANGO_DEBUG=False
+      - DJANGO_ALLOWED_HOSTS=*
+      # Change this in production!
+      - DJANGO_SECRET_KEY=change-me-in-production
+    depends_on:
+      - redis
+    restart: unless-stopped
